@@ -23,8 +23,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from typing import Any, Callable, Optional, Iterator
+from typing import Any, Callable, Optional, Iterator, List
+from weakref import ReferenceType
 import contextlib
+import inspect
 import io
 import os
 import socket
@@ -36,7 +38,6 @@ import traceback
 import weakref
 
 ### Streams ###
-
 
 try:
     import termios
@@ -189,13 +190,14 @@ def _queue_read_loop(self: 'Reader'):
             if not data:
                 print(' <- received EOF')
                 break
-            hexdump(data, title=' <- received ({:#x}) bytes (buflen={})'.format(len(data), len(self.buf)))
             self.buf.write(data)
 
             with self.lock:
                 sinks = self.sinks.copy()
-            for sink in sinks:
-                sink(data)
+            for ref in sinks:
+                sink = ref()
+                if sink:
+                    sink(data)
     except ReferenceError: # will be triggered when Reader falls out of scope
         pass
     try:
@@ -203,23 +205,35 @@ def _queue_read_loop(self: 'Reader'):
     except ReferenceError:
         pass
 
+byte_src_fn = Callable[[int], bytes]
+byte_sink_fn = Callable[[bytes], int]
+
+def weak_callable(cb: Callable) -> 'ReferenceType[Callable]':
+    if inspect.ismethod(cb):
+        ref = weakref.WeakMethod(cb)
+    else:
+        ref = weakref.ref(cb)
+    return ref
+
 class QueueReader:
-    def __init__(self, _read: Callable[[int], bytes]):
+    def __init__(self, _read: byte_src_fn):
         self._read = _read
         self.started = False
         self.done = False
         self.buf = ByteFIFO()
         self.lock = threading.RLock()
         self.start()
-        self.sinks = []
+        self.sinks = [] # type: List[ReferenceType[byte_sink_fn]]
 
-    def sink(self, cb: Callable[[bytes], None]) -> None:
+    def sink(self, cb: byte_sink_fn) -> None:
+        ref = weak_callable(cb)
         with self.lock:
-            self.sinks.append(cb)
+            self.sinks.append(ref)
 
-    def unsink(self, cb: Callable[[bytes], None]) -> None:
+    def unsink(self, cb: byte_sink_fn) -> None:
+        ref = weak_callable(cb)
         with self.lock:
-            try: self.sinks.remove(cb)
+            try: self.sinks.remove(ref)
             except ValueError: pass
 
     def close(self):
@@ -251,14 +265,49 @@ class QueueReader:
     def flush(self, size: int=-1) -> bytes:
         return self.buf.flush(size)
 
+
+notify_fn = Callable[['Stream', bytes, bool, str], None]
+
 class Stream:
     reader = None # type: QueueReader
-    def __init__(self, codec: 'Codec'=None):
+    def __init__(self, codec: 'Codec'=None, manager: 'Manager'=None):
         if codec is None:
             codec = Codec()
+        if manager is None:
+            manager = global_manager
         self.codec = codec
         self.interacting = False
         self._data = None # type: Optional[bytes]
+        self.sinks = [] # type: List[ReferenceType[notify_fn]]
+        self.lock = threading.RLock()
+        manager.register(self)
+
+    def sink(self, cb: notify_fn) -> None:
+        ref = weak_callable(cb)
+        with self.lock:
+            self.sinks.append(ref)
+
+    def unsink(self, cb: notify_fn) -> None:
+        ref = weak_callable(cb)
+        with self.lock:
+            try: self.sinks.remove(ref)
+            except ValueError: pass
+
+    def on_recv(self, data: str, name: str='') -> None:
+        with self.lock:
+            sinks = self.sinks
+        for ref in sinks:
+            sink = ref()
+            if sink:
+                sink(self, data, False, name=name)
+
+    def on_send(self, data: str, name: str='') -> None:
+        with self.lock:
+            sinks = self.sinks.copy()
+        for ref in sinks:
+            sink = ref()
+            if sink:
+                sink(self, data, True, name=name)
 
     @property
     def data(self) -> bytes:
@@ -279,9 +328,7 @@ class Stream:
         if isinstance(data, int):
             data = str(data)
         data = self.codec.tobytes(data)
-        if not self.interacting:
-            with self.reader.buf.cond: # kinda gross to use this lock but /shrug
-                hexdump(data, title=' -> sending ({:#x}) bytes'.format(len(data)))
+        self.on_send(data)
         view = memoryview(data)
         while len(view) > 0:
             n = self._write(view)
@@ -359,10 +406,11 @@ class Stream:
         return self
 
 class Socket(Stream):
-    def __init__(self, host: str, port: int, timeout: float=None):
-        super().__init__()
+    def __init__(self, host: str, port: int, timeout: float=None, manager: 'Manager'=None):
+        super().__init__(manager=manager)
         self.s = socket.create_connection((host, port), timeout=timeout)
         self.reader = QueueReader(self.s.recv)
+        self.reader.sink(self.on_recv)
 
     def _write(self, b: bytes) -> int:
         return self.s.send(b)
@@ -375,7 +423,7 @@ class Socket(Stream):
 
 class Process(Stream):
     def __init__(self, *args, **kwargs):
-        super().__init__()
+        super().__init__(manager=kwargs.pop('manager', None))
         for name in ('stdin', 'stdout', 'stderr', 'bufsize'):
             kwargs.pop(name, None)
         self.p = subprocess.Popen(args,
@@ -389,6 +437,12 @@ class Process(Stream):
         self.stdout = QueueReader(self.p.stdout.read)
         self.stderr = QueueReader(self.p.stderr.read)
         self.reader = self.stdout
+
+        # need to keep references here because the target uses weakrefs
+        self.on_stdout = lambda data: self.on_recv(data, name='stdout')
+        self.on_stderr = lambda data: self.on_recv(data, name='stderr')
+        self.stdout.sink(self.on_stdout)
+        self.stderr.sink(self.on_stderr)
 
     def read(self, size=-1, timeout=None):
         return self.stdout.read(size, timeout)
@@ -562,7 +616,7 @@ def hexlines(data: bytes, addr: int=0, codec: Codec=None, color: bool=True, fanc
         first = lines[0]
         out.append(first[0] + ' '.join(first[1:]))
     for i, line in enumerate(lines[1:]):
-        last = lines[i-1]
+        last = lines[i]
         if line[2:-3] == last[2:-3]:
             skip = True
         else:
@@ -574,9 +628,33 @@ def hexlines(data: bytes, addr: int=0, codec: Codec=None, color: bool=True, fanc
 
 ### End Data Objects ###
 
+class Manager:
+    def __init__(self):
+        self.codec = Codec()
+
+    def register(self, stream: 'Stream') -> None:
+        stream.sink(self.on_data)
+
+    def unregister(self, stream: 'Stream') -> None:
+        stream.unsink(self.on_data)
+
+    def on_data(self, stream: 'Stream', data: bytes, outgoing: bool, name: str='') -> None:
+        if outgoing:
+            if not stream.interacting:
+                hexdump(data, title=' -> send ({:#x}) bytes'.format(len(data)))
+        else:
+            title = ' <- recv ({:#x}) bytes'.format(len(data))
+            if name:
+                title += ' ({})'.format(name)
+            hexdump(data, title=title)
+
+    def set_codec(self, order: str, bits: int):
+        self.codec = Codec(order, bits)
+
 ### Helpers ###
 
-codec = Codec()
+global_manager = manager = Manager()
+set_codec = manager.set_codec
 
 def process(*argv: str, **kwargs) -> Process:
     return Process(*argv, **kwargs)
@@ -590,14 +668,14 @@ def blob(*args) -> Payload:
         b << a
     return b
 
-def  p8(value: int) -> bytes: return  codec.p8(value)
-def p16(value: int) -> bytes: return codec.p16(value)
-def p32(value: int) -> bytes: return codec.p32(value)
-def p64(value: int) -> bytes: return codec.p64(value)
+def  p8(value: int) -> bytes: return manager.codec. p8(value)
+def p16(value: int) -> bytes: return manager.codec.p16(value)
+def p32(value: int) -> bytes: return manager.codec.p32(value)
+def p64(value: int) -> bytes: return manager.codec.p64(value)
 
-def  u8(value: bytes) -> int: return  codec.u8(value)
-def u16(value: bytes) -> int: return codec.u16(value)
-def u32(value: bytes) -> int: return codec.u32(value)
-def u64(value: bytes) -> int: return codec.u64(value)
+def  u8(value: bytes) -> int: return manager.codec. u8(value)
+def u16(value: bytes) -> int: return manager.codec.u16(value)
+def u32(value: bytes) -> int: return manager.codec.u32(value)
+def u64(value: bytes) -> int: return manager.codec.u64(value)
 
 ### END HELPERS ###
