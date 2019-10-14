@@ -28,6 +28,7 @@ p.sendline('command')
 # after you p >> 'bar', the received text up to your marker is available (once) as `p.data`
 p << 'foo'
 p >> 'bar'
+data = p.data
 
 p >> '$ ' # expect a prompt
 p << 'send some text\n'
