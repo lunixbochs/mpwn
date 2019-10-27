@@ -342,7 +342,7 @@ class Stream:
 
     ## helpers
 
-    def interact(self) -> None:
+    def interactive(self) -> None:
         try:
             self.interacting = True
             self.reader.sink(self._interact_output)
@@ -386,7 +386,7 @@ class Stream:
 
     def recvline(self, timeout: float=None) -> bytes:
         self.expect(b'\n', timeout=timeout)
-        return self.value
+        return self._data
 
     def sendline(self, data: Any=b'') -> 'Stream':
         data = self.codec.tobytes(data)
