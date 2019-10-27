@@ -386,7 +386,7 @@ class Stream:
 
     def recvline(self, timeout: float=None) -> bytes:
         self.expect(b'\n', timeout=timeout)
-        return self.value
+        return self.data
 
     def sendline(self, data: Any=b'') -> 'Stream':
         data = self.codec.tobytes(data)

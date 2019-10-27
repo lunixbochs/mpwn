@@ -16,7 +16,7 @@ p.send('hi')
 print(p.recv(5))
 
 # directly connect your tty input/output to the target
-p.interactive()
+p.interact()
 
 # wait for a prompt and send a command:
 p.expect('$ ')
