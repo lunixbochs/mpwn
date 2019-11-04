@@ -379,7 +379,7 @@ class Stream:
         while not self.reader.done:
             pos = self.reader.find(target)
             if pos >= 0:
-                self._data = self.reader.read(pos)
+                self._data = self.reader.read(pos + len(target))
                 return self
             self.reader.wait(tout.time_left())
         raise EOFError('reader closed before expect() found')
