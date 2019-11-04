@@ -175,7 +175,7 @@ class ByteFIFO:
         with self.cond:
             if self.closed and not len(self):
                 raise ValueError('I/O operation on closed buffer.')
-            while self.write_pos - self.read_pos < size and not self.closed:
+            while (size < 0 or self.write_pos - self.read_pos < size) and not self.closed:
                 self.condwait(timeout=tout.time_left())
             return self.flush(size)
 
