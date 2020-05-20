@@ -24,7 +24,10 @@
 # THE SOFTWARE.
 
 from typing import Any, Callable, Optional, Iterator, List
+from typing import cast
 from weakref import ReferenceType
+import argparse
+import asyncio
 import contextlib
 import inspect
 import io
@@ -423,6 +426,7 @@ class Socket(Stream):
 
 class Process(Stream):
     def __init__(self, *args, **kwargs):
+        gdbinit = kwargs.pop('gdb', '')
         super().__init__(manager=kwargs.pop('manager', None))
         for name in ('stdin', 'stdout', 'stderr', 'bufsize'):
             kwargs.pop(name, None)
@@ -432,6 +436,15 @@ class Process(Stream):
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE,
                                   **kwargs)
+
+        script = sys.argv[0]
+        pidp     = '.{}.pid'.format(script)
+        gdbinitp = '.{}.gdbinit'.format(script)
+        with open(gdbinitp, 'w') as f:
+            f.write('{}\n'.format(gdbinit.strip()))
+        with open(pidp, 'w') as f:
+            f.write('{}\n'.format(self.p.pid))
+
         # TODO: wrap read() with a LoggingReader('process-stdout', args[0], ...?)
         # instead of logging from QueueReader
         self.stdout = QueueReader(self.p.stdout.read)
@@ -628,9 +641,84 @@ def hexlines(data: bytes, addr: int=0, codec: Codec=None, color: bool=True, fanc
 
 ### End Data Objects ###
 
+async def watch_file(path: str) -> None:
+    try:
+        old_st = os.stat(path)
+    except FileNotFoundError:
+        old_st = None
+    while True:
+        await asyncio.sleep(0.050)
+        try:
+            st = os.stat(path)
+            if not old_st or (st.st_mtime, st.st_ino, st.st_size) != (old_st.st_mtime, old_st.st_ino, old_st.st_size):
+                return
+        except FileNotFoundError:
+            pass
+
+def safe_readf(path: str, *, default: str='') -> str:
+    try:
+        with open(path, 'r') as f:
+            return f.read()
+    except Exception:
+        return default
+
+async def autorun_main(argv: List[str]) -> None:
+    script = argv[0]
+    while True:
+        print('[+] Launching: {} {}'.format(sys.executable, ' '.join(argv)))
+        done = pending = ()
+        p = await asyncio.create_subprocess_exec(sys.executable, *argv)
+        f_task = asyncio.create_task(watch_file(script))
+        p_task = asyncio.create_task(p.wait())
+        pending = {f_task, p_task}
+        while f_task in pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        if not p_task.done():
+            p.terminate()
+
+async def gdb_main(argv: List[str]) -> None:
+    script = argv[0]
+    pidp     = '.{}.pid'.format(script)
+    gdbinitp = '.{}.gdb.init'.format(script)
+    gdbsyncp = '.{}.gdb.ready'.format(script)
+    while True:
+        pid = int(safe_readf(pidp) or '0') or None
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pid = None
+        if not pid:
+            print('[-] waiting for target')
+            await watch_file(pidp)
+            continue
+        print('[+] launching gdb')
+        print('gdb got pid', pid)
+        await asyncio.sleep(2)
+        continue
+
 class Manager:
     def __init__(self):
-        self.codec = Codec()
+        self._codec = Codec()
+        self.verbose = False
+
+    def main(self, argv: List[str]):
+        if len(argv) > 1:
+            sub_argv = [sys.argv[0]] + sys.argv[2:]
+            if argv[1] == 'auto':
+                asyncio.run(autorun_main(sub_argv))
+                sys.exit(0)
+                return
+            if argv[1] == 'gdb':
+                asyncio.run(gdb_main(sub_argv))
+                sys.exit(0)
+                return
+        parser = argparse.ArgumentParser()
+        parser.add_argument('args', help='arguments to script', type=str, nargs='*')
+        parser.add_argument('-v', help='print verbose output',  action='store_true')
+        args = parser.parse_args()
+        self.verbose = args.v
+        sys.argv[:] = [sys.argv[0]] + args.args
 
     def register(self, stream: 'Stream') -> None:
         stream.sink(self.on_data)
@@ -639,6 +727,8 @@ class Manager:
         stream.unsink(self.on_data)
 
     def on_data(self, stream: 'Stream', data: bytes, outgoing: bool, name: str='') -> None:
+        if not self.verbose:
+            return
         if outgoing:
             if not stream.interacting:
                 hexdump(data, title=' -> send ({:#x}) bytes'.format(len(data)))
@@ -648,13 +738,20 @@ class Manager:
                 title += ' ({})'.format(name)
             hexdump(data, title=title)
 
-    def set_codec(self, order: str, bits: int):
-        self.codec = Codec(order, bits)
+    @property
+    def codec(self) -> Codec:
+        return self._codec
+    @codec.setter
+    def codec(self, codec: str) -> None:
+        if not (isinstance(codec, str) and len(codec) >= 2 and codec[1:].isdigit()):
+            raise ValueError('codec must be a string such as "<64" or ">32" representing the byte order and bit size')
+        order = codec[0]
+        bits = int(codec[1:])
+        self._codec = Codec(order, bits)
 
 ### Helpers ###
 
-global_manager = manager = Manager()
-set_codec = manager.set_codec
+global_manager = mpwn = Manager()
 
 def process(*argv: str, **kwargs) -> Process:
     return Process(*argv, **kwargs)
@@ -668,14 +765,16 @@ def blob(*args) -> Payload:
         b << a
     return b
 
-def  p8(value: int) -> bytes: return manager.codec. p8(value)
-def p16(value: int) -> bytes: return manager.codec.p16(value)
-def p32(value: int) -> bytes: return manager.codec.p32(value)
-def p64(value: int) -> bytes: return manager.codec.p64(value)
+def  p8(value: int) -> bytes: return global_manager._codec. p8(value)
+def p16(value: int) -> bytes: return global_manager._codec.p16(value)
+def p32(value: int) -> bytes: return global_manager._codec.p32(value)
+def p64(value: int) -> bytes: return global_manager._codec.p64(value)
 
-def  u8(value: bytes) -> int: return manager.codec. u8(value)
-def u16(value: bytes) -> int: return manager.codec.u16(value)
-def u32(value: bytes) -> int: return manager.codec.u32(value)
-def u64(value: bytes) -> int: return manager.codec.u64(value)
+def  u8(value: bytes) -> int: return global_manager._codec. u8(value)
+def u16(value: bytes) -> int: return global_manager._codec.u16(value)
+def u32(value: bytes) -> int: return global_manager._codec.u32(value)
+def u64(value: bytes) -> int: return global_manager._codec.u64(value)
 
 ### END HELPERS ###
+
+mpwn.main(sys.argv)
