@@ -371,6 +371,7 @@ class Stream:
         finally:
             self.interacting = False
             self.reader.unsink(self._interact_output)
+    interactive = interact # for pwntools users
 
     def _interact_output(self, data: bytes) -> None:
         sys.stdout.buffer.write(data)
