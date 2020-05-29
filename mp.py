@@ -711,6 +711,7 @@ class Manager:
     def __init__(self):
         self._codec = Codec()
         self.verbose = False
+        self.hexdump = False
 
     def main(self, argv: List[str]):
         if len(argv) > 1:
@@ -726,8 +727,10 @@ class Manager:
         parser = argparse.ArgumentParser()
         parser.add_argument('args', help='arguments to script', type=str, nargs='*')
         parser.add_argument('-v', help='print verbose output',  action='store_true')
+        parser.add_argument('-x', help='hexdump debug output',  action='store_true')
         args = parser.parse_args()
         self.verbose = args.v
+        self.hexdump = args.x
         sys.argv[:] = [sys.argv[0]] + args.args
 
     def register(self, stream: 'Stream') -> None:
@@ -739,14 +742,24 @@ class Manager:
     def on_data(self, stream: 'Stream', data: bytes, outgoing: bool, name: str='') -> None:
         if not self.verbose:
             return
+        if outgoing and stream.interacting:
+            return
         if outgoing:
-            if not stream.interacting:
-                hexdump(data, title=' -> send ({:#x}) bytes'.format(len(data)))
+            title = ' -> send ({:#x}) bytes'.format(len(data))
         else:
             title = ' <- recv ({:#x}) bytes'.format(len(data))
-            if name:
-                title += ' ({})'.format(name)
+        if name:
+            title += ' ({})'.format(name)
+        if self.hexdump:
             hexdump(data, title=title)
+        else:
+            try:
+                text = data.decode('utf8')
+                print(title)
+                for line in text.split('\n'):
+                    print(' ', line)
+            except UnicodeEncodeError:
+                hexdump(data, title=title)
 
     @property
     def codec(self) -> Codec:
