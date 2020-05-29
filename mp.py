@@ -25,7 +25,6 @@
 
 from typing import Any, Callable, Optional, Iterator, List
 from typing import cast
-from weakref import ReferenceType
 import argparse
 import asyncio
 import contextlib
@@ -212,7 +211,7 @@ def _queue_read_loop(self: 'Reader'):
 byte_src_fn = Callable[[int], bytes]
 byte_sink_fn = Callable[[bytes], int]
 
-def weak_callable(cb: Callable) -> 'ReferenceType[Callable]':
+def weak_callable(cb: Callable) -> 'weakref.ReferenceType[Callable]':
     if inspect.ismethod(cb):
         ref = weakref.WeakMethod(cb)
     else:
@@ -227,7 +226,7 @@ class QueueReader:
         self.buf = ByteFIFO()
         self.lock = threading.RLock()
         self.start()
-        self.sinks = [] # type: List[ReferenceType[byte_sink_fn]]
+        self.sinks = [] # type: List[weakref.ReferenceType[byte_sink_fn]]
 
     def sink(self, cb: byte_sink_fn) -> None:
         ref = weak_callable(cb)
@@ -282,7 +281,7 @@ class Stream:
         self.codec = codec
         self.interacting = False
         self._data = None # type: Optional[bytes]
-        self.sinks = [] # type: List[ReferenceType[notify_fn]]
+        self.sinks = [] # type: List[weakref.ReferenceType[notify_fn]]
         self.lock = threading.RLock()
         manager.register(self)
 
