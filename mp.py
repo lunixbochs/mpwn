@@ -76,6 +76,7 @@ class Timeout:
         if timeout is not None:
             self.never = False
             self.expires = time.monotonic() + timeout
+        self.timeout = timeout
 
     def check(self) -> bool:
         return self.never or time.monotonic() < self.expires
