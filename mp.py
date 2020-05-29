@@ -27,6 +27,7 @@ from typing import Any, Callable, Optional, Iterator, List
 from typing import cast
 import argparse
 import asyncio
+import atexit
 import contextlib
 import inspect
 import io
@@ -243,7 +244,16 @@ class QueueReader:
         self.done = True
         self.buf.close()
 
+    def close_exit(self):
+        self.done = True
+        try:
+            self.wait(0.1)
+        except TimeoutError:
+            pass
+        self.buf.close()
+
     def start(self) -> None:
+        atexit.register(self.close_exit)
         with self.lock:
             if not self.started:
                 self.started = True
