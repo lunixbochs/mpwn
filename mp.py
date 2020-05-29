@@ -127,7 +127,7 @@ class Scanf:
                     patterns.append(r'\s+')
                 else:
                     patterns.append(re.escape(d['text']))
-        patterns = [r'^\s*'] + patterns + [r'\s*$']
+        patterns = [r'^\s*'] + patterns
         self.regex = re.compile(''.join(patterns))
 
     def match(self, s: str) -> Sequence[Any]:
