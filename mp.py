@@ -23,7 +23,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from typing import Any, Callable, Optional, Iterator, List
+from typing import Any, Callable, Optional, Iterator, List, Tuple, Sequence
 from typing import cast
 import argparse
 import asyncio
@@ -32,6 +32,7 @@ import contextlib
 import inspect
 import io
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -93,6 +94,49 @@ class Timeout:
         if diff < 0:
             raise TimeoutError('{:.3f}s timeout reached'.format(self.timeout))
         return diff
+
+class Scanf:
+    """
+    (%d int) (%f float) (%o octal) (%x hex) (%s string / bytes)
+    %5d %4s, etc all limit the match length to N instead of breaking on whitespace (length is ignored on %f float)
+
+    For example: scanf("%d hello %4s %s", "4 hello blah anything") would return (4, "blah", "anything")
+    """
+    ESCAPES = re.compile(r'(%%|%(?P<len>\d*)(?P<fmtc>[dfoxs])|(?P<text>.+?))')
+    TABLE = {'d': '\d', 'f': '\d+(\.\d+)?', 'o': '[0-7]', 'x': '[0-9a-fA-F]', 's': '\S'}
+    CASTS = {'d': int, 'f': float, 'o': lambda x: int(x, 8), 'x': lambda x: int(x, 16), 's': lambda x: x}
+    def __init__(self, fmt: str):
+        self.casts = [] # type: List[Callable]
+        patterns = [] # type: List[str]
+        i = 0
+        for match in self.ESCAPES.finditer(fmt):
+            d = match.groupdict()
+            if d['fmtc']:
+                if d['len']:
+                    length = '{1,%d}' % int(d['len'])
+                else:
+                    length = '+'
+                if d['fmtc'] == 'f': # float can't be repeated
+                    length = ''
+                reg = '(?P<g{}>{}{})'.format(i, self.TABLE[d['fmtc']], length)
+                i += 1
+                patterns.append(reg)
+                self.casts.append(self.CASTS[d['fmtc']])
+            else:
+                if d['text'] == ' ':
+                    patterns.append(r'\s+')
+                else:
+                    patterns.append(re.escape(d['text']))
+        patterns = [r'^\s*'] + patterns + [r'\s*$']
+        self.regex = re.compile(''.join(patterns))
+
+    def match(self, s: str) -> Sequence[Any]:
+        if isinstance(s, bytes):
+            s = s.decode('utf8', 'replace')
+        match = self.regex.match(s)
+        return [self.casts[int(k[1:])](v) for k, v in match.groupdict().items()]
+
+    # print(Scanf('%s test %f test %o test %x test %s test %4d%4d').match(' blah test 0.1 test 0777 test 0bfe test qqqqqq test 12345678 '))
 
 class ByteFIFO:
     def __init__(self):
@@ -397,6 +441,9 @@ class Stream:
                 return self
             self.reader.wait(tout.time_left())
         raise EOFError('reader closed before expect() found')
+
+    def scan(self, fmt: str) -> Sequence[Any]:
+        return Scanf(fmt).match(self.data)
 
     def recvline(self, timeout: float=None) -> bytes:
         self.expect(b'\n', timeout=timeout)
