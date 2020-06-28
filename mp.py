@@ -473,6 +473,9 @@ class Socket(Stream):
         self.reader = QueueReader(self.s.recv)
         self.reader.sink(self.on_recv)
 
+    def eof(self) -> None:
+        self.s.shutdown(socket.SHUT_WR)
+
     def _write(self, b: bytes) -> int:
         return self.s.send(b)
 
@@ -514,6 +517,9 @@ class Process(Stream):
         self.on_stderr = lambda data: self.on_recv(data, name='stderr')
         self.stdout.sink(self.on_stdout)
         self.stderr.sink(self.on_stderr)
+
+    def eof(self) -> None:
+        self.p.stdin.close()
 
     def read(self, size=-1, timeout=None):
         return self.stdout.read(size, timeout)
