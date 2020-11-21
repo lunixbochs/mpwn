@@ -808,7 +808,7 @@ class Manager:
             hexdump(data, title=title)
         else:
             try:
-                text = data.decode('utf8')
+                text = data.decode('utf8', 'replace')
                 print(title)
                 for line in text.split('\n'):
                     print(' ', line)
