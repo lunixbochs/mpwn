@@ -292,7 +292,7 @@ class QueueReader:
         self.done = True
         try:
             self.wait(0.1)
-        except TimeoutError:
+        except (TimeoutError, ValueError):
             pass
         self.buf.close()
 
