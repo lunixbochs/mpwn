@@ -229,7 +229,7 @@ class ByteFIFO:
 
     def __len__(self):
         with self.cond:
-            return self.write_pos - self.read_pos
+            return max(self.write_pos - self.read_pos, 0)
 
 def _queue_read_loop(self: 'Reader'):
     try:
