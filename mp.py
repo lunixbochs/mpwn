@@ -102,7 +102,7 @@ class Scanf:
 
     For example: scanf("%d hello %4s %s", "4 hello blah anything") would return (4, "blah", "anything")
     """
-    ESCAPES = re.compile(r'(%%|%(?P<len>\d*)(?P<fmtc>[dfoxs])|(?P<text>.+?))')
+    ESCAPES = re.compile(r'(%%|%(?P<len>\d*)(?P<fmtc>[dfoxs])|(?P<text>.+?))', flags=re.DOTALL)
     TABLE = {'d': '\d', 'f': '\d+(\.\d+)?', 'o': '[0-7]', 'x': '[0-9a-fA-F]', 's': '\S'}
     CASTS = {'d': int, 'f': float, 'o': lambda x: int(x, 8), 'x': lambda x: int(x, 16), 's': lambda x: x}
     def __init__(self, fmt: str):
